@@ -13,10 +13,16 @@ an error: an unlinked page is a gap in the index, not a lie in it.
 The index-drift check reads it from the root: `wiki/SCHEMA.md` rule 2 makes
 `INDEX.md` the entry point every page must sit within two hops of, so drift is
 measured as distance from that one node rather than as a property of any page.
+
+The directory-scale check is the second half of that same rule, and the only
+check here that does not read the graph at all: it counts files per directory,
+because a directory that outgrows its index is what makes the two-hop budget
+impossible to meet in the first place.
 """
 
 import collections
 import dataclasses
+import pathlib
 
 from . import check
 from ..model import Finding, Severity
@@ -25,11 +31,26 @@ from ..pages import MARKDOWN_SUFFIX
 BROKEN_LINK = "broken-link"
 ORPHAN_PAGE = "orphan-page"
 INDEX_DRIFT = "index-drift"
+DIRECTORY_SCALE = "directory-scale"
+
+INDEX_FILENAME = "INDEX.md"
 
 # `wiki/SCHEMA.md` rule 2: "Every page reachable from `wiki/INDEX.md` within 2
 # link hops."
 MAX_HOPS = 2
-ROOT_INDEX = "INDEX.md"
+ROOT_INDEX = INDEX_FILENAME
+
+# The rest of rule 2, quoted so the finding can hand the reader the sentence it
+# is enforcing. "~40" is a soft number in prose and an exact one here — a linter
+# that reported "roughly too many pages" would be unusable — so the threshold
+# lives in one named constant and the check fires strictly above it.
+MAX_DIR_PAGES = 40
+SCHEMA_RULE_2_SCALE = "Beyond ~40 pages per directory → add a directory INDEX.md"
+
+# How a page at the wiki root names its directory. `PurePosixPath` yields "." for
+# it, which is correct but reads as a typo in a report, so findings say "the wiki
+# root" in prose and keep "." only as the machine-readable path.
+WIKI_ROOT_DIR = "."
 
 # The framework files at the wiki root are entry points, not destinations:
 # INDEX.md is where a reader starts, and SCHEMA.md and log.md are addressed by
@@ -309,6 +330,77 @@ def check_index_drift(pages, root):
                 path=page.rel_path,
                 line=None,
                 message=_describe_depth(page.rel_path, depth),
+            )
+        )
+    return findings
+
+
+def pages_by_directory(pages):
+    """`directory` → the pages directly inside it, keyed by POSIX rel_path.
+
+    Per directory, never per subtree. Rule 2's repair is a *directory*
+    `INDEX.md`, so splitting an oversized directory into subdirectories has to
+    read as a real fix rather than as the same pile relabelled — which means a
+    page in `projects/sub/` counts toward `projects/sub`, not toward `projects`.
+    Directories holding only subdirectories never appear, and need no index.
+    """
+    grouped = {}
+    for page in pages:
+        directory = pathlib.PurePosixPath(page.rel_path).parent.as_posix()
+        grouped.setdefault(directory, []).append(page)
+    return grouped
+
+
+def _index_path(directory):
+    if directory == WIKI_ROOT_DIR:
+        return INDEX_FILENAME
+    return f"{directory}/{INDEX_FILENAME}"
+
+
+def _has_index(group):
+    """True when one of these pages is the directory's own `INDEX.md`.
+
+    Matched on the exact filename `wiki/SCHEMA.md` names. A lowercase `index.md`
+    is not that file: treating it as one would let a directory look indexed here
+    while the kebab-case and link checks go on regarding it as an ordinary page.
+    """
+    return any(page.rel_path.rsplit("/", 1)[-1] == INDEX_FILENAME for page in group)
+
+
+def _describe_scale(directory, count):
+    where = "the wiki root" if directory == WIKI_ROOT_DIR else f"{directory}/"
+    return (
+        f"{where} holds {count} pages — SCHEMA rule 2: "
+        f'"{SCHEMA_RULE_2_SCALE}"; add {_index_path(directory)}'
+    )
+
+
+@check(DIRECTORY_SCALE)
+def check_directory_scale(pages, root):
+    """No directory outgrows its index (spec criterion 9).
+
+    A `warn`, not an error: an unindexed 41-page directory is navigable, just
+    barely, and the wiki it describes is not wrong — only harder to keep within
+    the two hops `check_index_drift` enforces. It is the early signal for that
+    error rather than an error itself.
+
+    The one check here whose `Finding.path` is a directory rather than a page.
+    The defect belongs to no single file — no page in an oversized directory is
+    the guilty one — and naming the missing `INDEX.md` instead would point the
+    reader at a path that does not exist yet. The directory is what the reader
+    opens, so it is what the finding names; the message carries the repair.
+    """
+    findings = []
+    for directory, group in sorted(pages_by_directory(pages).items()):
+        if len(group) <= MAX_DIR_PAGES or _has_index(group):
+            continue
+        findings.append(
+            Finding(
+                check=DIRECTORY_SCALE,
+                severity=Severity.WARN,
+                path=directory,
+                line=None,
+                message=_describe_scale(directory, len(group)),
             )
         )
     return findings
