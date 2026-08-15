@@ -262,8 +262,25 @@ class TestMatchesBelowThresholdAreLeftUnfixed(unittest.TestCase):
             one_source_wiki(tmp, "concepts/alpah", ["alpha"])
 
             plan = run_fix(tmp)
+            text = read(tmp, "concepts/source.md")
 
-        self.assertIn("[[concepts/alpah]]", read(tmp, "concepts/source.md"))
+        self.assertIn("[[concepts/alpah]]", text)
+        self.assertTrue(link_findings(plan.remaining))
+
+    def test_a_page_is_not_repointed_at_itself(self):
+        # The page's own stem is the closest thing to `[[alpah]]` here, but a
+        # self-link is a link no author writes on purpose: whatever was meant,
+        # it was not "this page". Counting the page as a candidate and then
+        # refusing it is strictly more conservative than dropping it from the
+        # candidate list, which could turn a two-way tie into a rewrite.
+        with tempfile.TemporaryDirectory() as tmp:
+            write_page(tmp, "INDEX.md", "# I\n\n## Concepts\n- [[concepts/alpha]]\n")
+            write_page(tmp, "concepts/alpha.md", "# Alpha\n\nSee [[alpah]].\n")
+
+            plan = run_fix(tmp)
+            text = read(tmp, "concepts/alpha.md")
+
+        self.assertIn("[[alpah]]", text)
         self.assertTrue(link_findings(plan.remaining))
 
     def test_an_empty_wiki_of_candidates_rewrites_nothing(self):
@@ -373,12 +390,11 @@ class TestIndexEntriesAreRepairedNotDeleted(unittest.TestCase):
             write_page(tmp, "concepts/alpha.md", "# Alpha\n")
 
             plan = run_fix(tmp)
+            text = read(tmp, "INDEX.md")
 
-        self.assertIn(
-            "- [[concepts/alpha]] — the founding concept.",
-            read(tmp, "INDEX.md"),
-        )
-        self.assertEqual(plan.remaining, ())
+        self.assertIn("- [[concepts/alpha]] — the founding concept.", text)
+        self.assertEqual(text.count("[[concepts/alpha]]"), 1)
+        self.assertEqual(link_findings(plan.remaining), [])
 
 
 class TestNothingToFix(unittest.TestCase):

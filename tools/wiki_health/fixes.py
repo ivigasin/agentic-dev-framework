@@ -16,10 +16,10 @@ difference is whether `apply_plan` is called. There is no second code path to
 keep in sync, and no way for a pass to sneak a write in — a pass never receives
 a path or a file handle, only the `FixPlan` it stages text into.
 
-## Writing a fix pass (Tasks 15, 16)
+## Writing a fix pass (Task 16)
 
-    @fix(structural.BROKEN_LINK)
-    def fix_broken_links(plan):
+    @fix(SOME_CHECK)
+    def fix_something(plan):
         lines = plan.lines_for("concepts/alpha.md")
         ...
         plan.stage_lines("concepts/alpha.md", lines, ["what changed"])
@@ -30,6 +30,11 @@ a path or a file handle, only the `FixPlan` it stages text into.
   compose instead of clobbering.
 - New passes go **above** the `ALL_FIXES = tuple(_REGISTRY)` line at the bottom
   of this file, or they never run.
+- Registration order is load-bearing where two passes disagree about the same
+  line. `fix_broken_links` runs before `fix_index_drift` because a repair
+  preserves more than a deletion: a typo'd index entry gets its target corrected
+  rather than dropped and re-added without its description. A pass that *edits*
+  should generally precede one that *removes*.
 - `stage_lines` takes the file's complete intended contents. An append (Task
   16's `log.md` line) is expressed as the original lines plus the new one, which
   is what keeps the append-only guarantee checkable: the prefix is carried over
@@ -55,11 +60,13 @@ file they will open.
 """
 
 import dataclasses
+import difflib
 import pathlib
 
 from . import checks, pages as pages_module
 from .checks import structural
 from .checks.structural import (
+    BROKEN_LINK,
     EXEMPT_ROOTS,
     INDEX_DRIFT,
     LinkIndex,
@@ -67,7 +74,20 @@ from .checks.structural import (
     ROOT_INDEX,
     hop_depths,
 )
-from .pages import MARKDOWN_SUFFIX
+from .pages import LINK_RE, MARKDOWN_SUFFIX
+
+# How close a broken `[[target]]` must be to a page's filename stem before the
+# link fix will rewrite it, as a `difflib.SequenceMatcher` ratio. The one place
+# the number lives; a test tokenizes this module and fails on a second copy.
+#
+# The value is a judgement, not a measurement, and it is set where it is because
+# of what it costs to be wrong in each direction. Too low and the tool rewrites
+# a link to a page the author never meant — a silent change of meaning that no
+# later check can detect, because the result is a perfectly valid link. Too high
+# and the tool reports a typo it could have fixed, which costs a human thirty
+# seconds. Those are not symmetric, so the threshold sits high enough that only
+# a near-miss qualifies: one or two characters in a short name.
+LINK_FIX_MIN_RATIO = 0.75
 
 # Which `## ` heading of `wiki/INDEX.md` a page belongs under, keyed by its
 # top-level directory. The headings are copied from the real `wiki/INDEX.md`
@@ -233,6 +253,135 @@ def _link_target(rel_path):
     if rel_path.endswith(MARKDOWN_SUFFIX):
         return rel_path[: -len(MARKDOWN_SUFFIX)]
     return rel_path
+
+
+def _similarity(target, stem):
+    """How close a link target is to a filename stem, in `[0, 1]`."""
+    return difflib.SequenceMatcher(None, target, stem).ratio()
+
+
+def _sole_candidate(target, page, pages):
+    """The one page `target` plausibly meant, or None — and None is the default.
+
+    *Exactly one* page at or above `LINK_FIX_MIN_RATIO`. Not the closest page,
+    not the best of several: one. The distinction is the whole safety property.
+    A target that scores 0.91 against one page and 0.80 against another is not a
+    typo the tool understands — it is a typo with two readings, and picking the
+    higher score would be the tool inventing an intention the author did not
+    express. Ambiguous links fall out of the same count for free: two pages
+    sharing a stem both score 1.0, so there are two candidates and no fix.
+
+    `page` itself is counted as a candidate but never returned as one. A page
+    linking to itself is a link nobody writes on purpose, so whatever the author
+    meant, it was not "here". Counting it and then refusing is deliberately more
+    conservative than excluding it from the list, which would let a two-way tie
+    collapse into a rewrite.
+
+    Comparison is against the filename *stem*, and the target is compared as
+    written — so a typo inside a directory-qualified `[[concepts/alpah]]` scores
+    far below the threshold and is reported instead. Stripping the directory
+    before comparing would repair more links, but it would also let a link whose
+    *directory* is wrong be silently retargeted, which is the failure this
+    threshold exists to prevent.
+    """
+    candidates = [
+        candidate
+        for candidate in pages
+        if _similarity(target, candidate.name) >= LINK_FIX_MIN_RATIO
+    ]
+    if len(candidates) != 1:
+        return None
+    if candidates[0].rel_path == page.rel_path:
+        return None
+    return candidates[0]
+
+
+def _replacement_for(target, page, pages, link_index):
+    """The text to put inside `[[ ]]` instead of `target`, or None to leave it.
+
+    Only *broken* links are candidates for repair — a link that resolves is a
+    link the author got right, however unlike a filename it happens to look.
+
+    The replacement is directory-qualified, the same call `fix_index_drift`
+    makes for new entries: a bare stem resolves today and breaks the day a
+    second page takes that name, and a fix that plants a future ambiguity is
+    not much of a fix.
+    """
+    if link_index.resolve(target).is_resolved:
+        return None
+    candidate = _sole_candidate(target, page, pages)
+    if candidate is None:
+        return None
+    replacement = _link_target(candidate.rel_path)
+    return None if replacement == target else replacement
+
+
+def _link_repairs(page, link_index, pages):
+    """`line_no` → `{old target: new target}` for the links to rewrite on `page`.
+
+    Keyed by line so the rewrite can touch exactly the lines carrying a repair
+    and leave the rest of the file, including anything inside a fence,
+    byte-identical: `page.links` never reports fenced links, so a fenced
+    `[[demoo]]` can never appear here even when an identical link elsewhere in
+    the file is being repaired.
+    """
+    repairs = {}
+    replacements = {}
+    for target, line_no in page.links:
+        if target not in replacements:
+            replacements[target] = _replacement_for(target, page, pages, link_index)
+        replacement = replacements[target]
+        if replacement is None:
+            continue
+        repairs.setdefault(line_no, {})[target] = replacement
+    return repairs
+
+
+def _rewrite_line(line, repairs):
+    """Replace only the text inside `[[ ]]`; the rest of the line is untouched.
+
+    Substituting on the match rather than rebuilding the line is what keeps the
+    surrounding prose — the em-dash description on an index entry, the other
+    links in a `## Related:` list — exactly as it was.
+    """
+
+    def substitute(match):
+        replacement = repairs.get(match.group(1).strip())
+        if replacement is None:
+            return match.group(0)
+        return f"[[{replacement}]]"
+
+    return LINK_RE.sub(substitute, line)
+
+
+@fix(BROKEN_LINK)
+def fix_broken_links(plan):
+    """Repair unambiguous link typos (spec criterion 16).
+
+    Registered *before* the index-drift pass, and the order is load-bearing.
+    That pass deletes a root-index list entry whose links all name nothing —
+    which a typo does. Repairing first means `- [[alpah]] — the founding
+    concept.` keeps its sentence instead of being deleted and re-added bare.
+    Every case the link fix declines still reaches the index pass unchanged, so
+    running first only ever preserves information.
+    """
+    pages = plan.current_pages()
+    link_index = LinkIndex(pages)
+    for page in pages:
+        repairs = _link_repairs(page, link_index, pages)
+        if not repairs:
+            continue
+        lines = plan.lines_for(page.rel_path)
+        if lines is None:
+            continue
+        summaries = []
+        for line_no in sorted(repairs):
+            lines[line_no - 1] = _rewrite_line(lines[line_no - 1], repairs[line_no])
+            summaries.extend(
+                f"{page.rel_path}:{line_no}: [[{old}]] → [[{new}]]"
+                for old, new in sorted(repairs[line_no].items())
+            )
+        plan.stage_lines(page.rel_path, lines, summaries)
 
 
 def _section_heading(rel_path):
