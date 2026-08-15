@@ -1,0 +1,9 @@
+# Governance files — changes require human review.
+# Syntax: pattern followed by owner(s). Last matching pattern wins.
+
+/CLAUDE.md        @ivigasin
+/skills/          @ivigasin
+/.claude/         @ivigasin
+/githooks/        @ivigasin
+/.github/         @ivigasin
+/wiki/SCHEMA.md   @ivigasin

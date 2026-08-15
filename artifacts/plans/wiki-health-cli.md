@@ -205,7 +205,13 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   message quotes SCHEMA rule 2. Generate the 41 stubs with a small loop in the
   fixture-creation step rather than hand-writing them.
 - Done when: tests pass.
-- [ ] completed
+- [x] completed — chose **tempfile generation over a committed fixture**: 41
+  near-identical stubs are unreadable, and suppressing orphan/index-drift would
+  need 41 INDEX entries maintained forever. `TestNoIncidentalFindings` asserts
+  `run_all` over the generated wiki yields exactly `["directory-scale"]`.
+  Counts per DIRECTORY, not subtree (rule 2's repair is a directory INDEX.md).
+  **`Finding.path` is a directory here, not a page** — the only such check;
+  wiki root serializes as `"."`. Tasks 13/20 can rely on that.
 
 ## Task 9: Check — concept page conformance
 
@@ -240,7 +246,14 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   `datetime.strptime(..., "%Y-%m-%d")`. Headings: `## Context`, `## Decision`,
   `## Consequences` (prefix match — SCHEMA's has a parenthetical).
 - Done when: tests pass.
-- [ ] completed
+- [x] completed — FOUR ids: `adr-bad-filename`, `adr-bad-status`,
+  `adr-bad-date`, `adr-missing-heading`. A shared id would let a dead check
+  stay invisible to Task 20's once-each assertion. New shared helper
+  `labelled_line(page, label)` → `(line_no, value)`, fence-aware.
+  **`Status:` is case-sensitive and exact** because Task 11 re-parses the
+  supersede pointer out of that string — flagged for review as a judgment call.
+  Date is `strptime`-parsed, so `2026-02-30` is rejected. Badly-named ADRs are
+  still body-validated, so a rename can't smuggle a page out of validation.
 
 ## Task 11: Check — ADR numbering and supersede pointers
 
@@ -252,7 +265,14 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   missing ADR is an error"`, `"valid supersede chain passes"`.
 - Context: spec criteria 12, 13; `wiki/SCHEMA.md` ("ADRs are append-only").
 - Done when: tests pass.
-- [ ] completed
+- [x] completed — `adr-duplicate-number`, `adr-superseded-missing`. A duplicate
+  group of N yields N−1 findings on later-sorting pages, so a two-ADR clash
+  yields exactly one (keeps Task 20's once-each assertion viable). Supersede
+  pointers matched by ADR **number**, not wikilink resolution — the two
+  diverge in both directions. Capture group added to the existing
+  `ADR_SUPERSEDED_RE` so validation and extraction can't drift.
+  Overlap with `broken-link` **accepted** (Task 7 precedent): a pointer to a
+  never-written ADR is intrinsically also an unresolvable link.
 
 ## Task 12: Check — kebab-case filenames
 
@@ -264,7 +284,14 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
 - Context: spec criterion 14; `wiki/SCHEMA.md` `<kebab-name>` convention.
 - Details: the three uppercase framework files are exempt by name.
 - Done when: tests pass.
-- [ ] completed
+- [x] completed — **skips `decisions/` entirely**, handing it to
+  `adr-bad-filename`. Justified by containment, and the containment is
+  *asserted* on five name shapes rather than assumed: both regexes derive from
+  `ADR_SLUG_PATTERN`, so any name failing kebab-case necessarily fails the ADR
+  pattern too. Deliberately the opposite call from Task 11's accepted overlap
+  (there the checks diverge in both directions; here one strictly contains the
+  other). Exemption is exact-name, so `concepts/Index.md` IS reported.
+  Registry closes at **13 unique check ids**.
 
 ## Task 13: Wire checks into the CLI and set exit codes
 
@@ -281,7 +308,14 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   `python3 tools/wiki-health.py --path wiki` against the repo's real (empty)
   wiki completes without crashing. Record its output in the task notes; a
   finding count of zero is not required, only that it does not error.
-- [ ] completed
+- [x] completed — real wiki: `No findings.`, exit 0. `exit_code_for(report,
+  strict)` is a pure function that skips `fixed=True`, so Tasks 14–16 get
+  correct exit codes without touching threshold logic. `build_report(path)`
+  extracted as the read-only pipeline for fix-mode to reuse.
+  Discovery wrapped in `(OSError, UnicodeDecodeError)` → exit 2: without it an
+  unreadable file tracebacks to exit 1, indistinguishable from "wiki unhealthy"
+  and violating criterion 3. `--fix`/`--dry-run` inert but emit a stderr notice
+  rather than silently no-op'ing.
 
 ## Task 14: Auto-fix — index drift
 
@@ -297,7 +331,16 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   matching the real `wiki/INDEX.md`. If the expected section heading is absent,
   report rather than invent it.
 - Done when: tests pass.
-- [ ] completed
+- [x] completed — **the dry-run seam is the write seam**:
+  `plan_fixes(pages, root, findings)` is filesystem-pure, `apply_plan(plan)` is
+  the ONLY writer, `run_fixes(..., dry_run)` chooses. One code path, so a fix
+  pass physically cannot write. `@fix(<check id>)` registry mirrors `@check`.
+  Passes do NOT declare what they fixed — `FixPlan.settle()` re-runs the full
+  check suite over the hypothetical post-fix wiki and diffs, so a repair that
+  doesn't clear its check can't be reported as fixed. Diff matches on
+  `(check, path, message)` ignoring `line`, since deletions shift lines.
+  Three guards on stale-entry deletion: list entries only, only when no link on
+  the line resolves, never an ambiguous link.
 
 ## Task 15: Auto-fix — broken links, threshold-gated
 
@@ -404,6 +447,40 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
 - [ ] completed
 
 ---
+
+## BLOCKER — Tasks 17, 18, 19 gated on permissions (2026-08-16)
+
+`.claude/settings.json` gained a `permissions.deny` list mid-implementation:
+
+```
+Edit/Write(./CLAUDE.md), Edit/Write(./.claude/**),
+Edit/Write(./skills/**), Edit/Write(./githooks/**)
+```
+
+That denies every file the rewiring phase must change:
+
+| Task | Blocked file | Status |
+|---|---|---|
+| 17 | `CLAUDE.md`, `skills/INDEX.md`, delete `skills/wiki-lint/` | blocked (README.md is writable) |
+| 18 | `skills/finish/SKILL.md` | blocked — tests written and RED |
+| 19 | `.claude/hooks/wiki-health-check.sh`, `.claude/settings.json` | blocked |
+
+Not routed around with Bash `rm`/`sed`: a deny entry is the user's decision.
+The suite is RED by exactly 3 tests in `tools/tests/test_finish_wiring.py`
+until Task 18's edit lands. Those failures are EXPECTED, not a regression.
+
+Task 18's replacement text for `skills/finish/SKILL.md` line 26, ready to apply
+verbatim:
+
+```
+6. Run `python3 tools/wiki-health.py --json` and parse the report. Repair every
+   finding (`--fix` handles index drift and unambiguous broken links), then
+   re-run. A non-zero `summary.error` blocks EXIT — this step is not done
+   until that count is zero.
+```
+
+Resolution needs one of: the user lifts the deny for these paths, or applies
+the edits by hand.
 
 ## Deferred to `finish`
 

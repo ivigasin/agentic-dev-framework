@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Gate: governance files may not change without explicit override.
+set -euo pipefail
+
+GOVERNANCE='^(CLAUDE\.md|skills/|\.claude/|githooks/)'
+
+changed=$(git diff --cached --name-only | grep -E "$GOVERNANCE" || true)
+
+if [[ -n "$changed" ]]; then
+  echo "⛔ Commit touches governance files:"
+  echo "$changed" | sed 's/^/   - /'
+  echo ""
+  echo "Governance changes must go through a PR reviewed by a human."
+  echo "If you are the human and this is deliberate:"
+  echo "  ALLOW_GOVERNANCE=1 git commit ..."
+  [[ "${ALLOW_GOVERNANCE:-0}" == "1" ]] && exit 0
+  exit 1
+fi
