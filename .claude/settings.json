@@ -1,0 +1,30 @@
+{
+
+  "permissions":{
+   "deny": [
+      "Edit(./CLAUDE.md)",
+      "Write(./CLAUDE.md)",
+      "Edit(./.claude/**)",
+      "Write(./.claude/**)",
+      "Edit(./skills/**)",
+      "Write(./skills/**)",
+      "Edit(./githooks/**)",
+      "Write(./githooks/**)",
+      "Bash(git push:*)",
+      "Bash(git commit --no-verify:*)"
+    ],
+    "ask": [
+      "Edit(./wiki/SCHEMA.md)",
+      "Write(./wiki/SCHEMA.md)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh" }
+        ]
+      }
+    ]
+  }
+}
