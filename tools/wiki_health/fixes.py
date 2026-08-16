@@ -16,7 +16,11 @@ difference is whether `apply_plan` is called. There is no second code path to
 keep in sync, and no way for a pass to sneak a write in — a pass never receives
 a path or a file handle, only the `FixPlan` it stages text into.
 
-## Writing a fix pass (Task 16)
+`run_fixes(..., log=True)` additionally stages the `wiki/log.md` line SCHEMA
+rule 5 requires — staged, so it goes through the same seam as everything else
+and shows up in a dry run instead of being written behind one.
+
+## Writing a fix pass
 
     @fix(SOME_CHECK)
     def fix_something(plan):
@@ -35,9 +39,9 @@ a path or a file handle, only the `FixPlan` it stages text into.
   preserves more than a deletion: a typo'd index entry gets its target corrected
   rather than dropped and re-added without its description. A pass that *edits*
   should generally precede one that *removes*.
-- `stage_lines` takes the file's complete intended contents. An append (Task
-  16's `log.md` line) is expressed as the original lines plus the new one, which
-  is what keeps the append-only guarantee checkable: the prefix is carried over
+- `stage_lines` takes the file's complete intended contents. An append — the
+  `log.md` line — is expressed as the original lines plus the new one, which is
+  what keeps the append-only guarantee checkable: the prefix is carried over
   verbatim rather than regenerated.
 
 ## What counts as fixed
@@ -60,6 +64,7 @@ file they will open.
 """
 
 import dataclasses
+import datetime
 import difflib
 import pathlib
 
@@ -74,7 +79,15 @@ from .checks.structural import (
     ROOT_INDEX,
     hop_depths,
 )
+from .model import Severity
 from .pages import LINK_RE, MARKDOWN_SUFFIX
+
+# `wiki/log.md`, and the name this tool signs its lines with. SCHEMA rule 5
+# makes the log append-only and obliges "every ingest/finish/lint" to write one
+# line; the field layout copies `skills/finish/SKILL.md:24` so a reader scanning
+# the log sees one shape, not two.
+LOG_PATH = "log.md"
+LOG_ACTOR = "wiki-health"
 
 # How close a broken `[[target]]` must be to a page's filename stem before the
 # link fix will rewrite it, as a `difflib.SequenceMatcher` ratio. The one place
@@ -123,7 +136,7 @@ def fix(check_id):
 class Edit:
     """One file's complete intended contents, plus why.
 
-    `summaries` is what `--dry-run` prints (Task 16). It accumulates across
+    `summaries` is what `--dry-run` prints. It accumulates across
     passes, so a file two passes both touched explains both changes.
     """
 
@@ -544,12 +557,66 @@ def fix_index_drift(plan):
 ALL_FIXES = tuple(_REGISTRY)
 
 
-def plan_fixes(pages, root, findings=None):
+def log_line(fixed, errors, warns, today=None):
+    """The one line a `--fix` run appends to `wiki/log.md`.
+
+    `today` is a parameter rather than a call to `date.today()` buried inside,
+    so a test can assert the whole line verbatim instead of pattern-matching a
+    date it cannot predict. Production passes nothing and gets today.
+
+    `errors` and `warns` count what is *left* for a human after the repairs —
+    the log is a record of the state the run walked away from, and a count that
+    included the findings just fixed would read as though nothing improved.
+    """
+    day = (today or datetime.date.today()).isoformat()
+    return (
+        f"{day} | {LOG_ACTOR} | fixed: {fixed} | errors: {errors} | warns: {warns}"
+    )
+
+
+def _stage_log(plan, today=None):
+    """Stage the log append (criterion 17). Not a fix pass — see below.
+
+    Deliberately outside the `@fix` registry and run *after* `settle`: the line
+    reports how the run turned out, so it cannot be written by a pass that runs
+    before the outcome is known. It is still staged into the same `FixPlan`,
+    which is what keeps `apply_plan` the only writer and puts the log append in
+    the `--dry-run` preview alongside every other intended change.
+
+    Appended, never rewritten: `stage_lines` receives the file's existing lines
+    verbatim plus one more, so SCHEMA rule 5 holds by construction rather than
+    by a promise in a docstring.
+
+    A wiki with no `log.md` gets none written. The same stance as the index
+    pass — an absent framework file is a finding for a human, not a file an
+    auto-fix invents.
+    """
+    lines = plan.lines_for(LOG_PATH)
+    if lines is None:
+        return
+    counts = {Severity.ERROR.value: 0, Severity.WARN.value: 0}
+    for finding in plan.remaining:
+        counts[Severity(finding.severity).value] += 1
+    line = log_line(
+        fixed=len(plan.fixed),
+        errors=counts[Severity.ERROR.value],
+        warns=counts[Severity.WARN.value],
+        today=today,
+    )
+    plan.stage_lines(LOG_PATH, lines + [line], [f"{LOG_PATH}: append {line}"])
+
+
+def plan_fixes(pages, root, findings=None, log=False, today=None):
     """Compute every repair without performing any of them.
 
     Pure with respect to the filesystem: it reads, it never writes. `findings`
     is the read-only report the CLI already built; passing it in keeps the
     fix run and the plain run describing the same wiki.
+
+    `log` is opt-in because the log line records that *the tool acted on this
+    wiki*, which is true of a `--fix` invocation and not of a caller that only
+    wants to know what the passes would do. The CLI passes it; the fix-pass
+    tests do not, and so leave `log.md` alone.
     """
     if findings is None:
         findings = checks.run_all(pages, root)
@@ -557,6 +624,8 @@ def plan_fixes(pages, root, findings=None):
     for fix_pass in ALL_FIXES:
         fix_pass(plan)
     plan.settle(findings)
+    if log:
+        _stage_log(plan, today)
     return plan
 
 
@@ -576,9 +645,15 @@ def apply_plan(plan):
     return plan.written
 
 
-def run_fixes(pages, root, findings=None, dry_run=False):
-    """Plan the repairs, and unless `dry_run`, carry them out."""
-    plan = plan_fixes(pages, root, findings)
+def run_fixes(pages, root, findings=None, dry_run=False, log=False, today=None):
+    """Plan the repairs, and unless `dry_run`, carry them out.
+
+    The whole difference between a dry run and a real one is the `if` below.
+    Both build the identical plan — log line included — so the preview a user
+    reads is the plan that would have been written, not a separate rendering of
+    it that could drift.
+    """
+    plan = plan_fixes(pages, root, findings, log=log, today=today)
     if not dry_run:
         apply_plan(plan)
     return plan

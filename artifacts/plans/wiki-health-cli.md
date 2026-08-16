@@ -357,7 +357,18 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   tool: when in doubt, report. Rewrite must preserve the rest of the line
   verbatim — replace only the text inside `[[ ]]`.
 - Done when: tests pass, and the threshold lives in exactly one named constant.
-- [ ] completed
+- [x] completed — `_sole_candidate` collects ALL pages ≥ threshold and returns
+  one only when `len == 1`; no argmax anywhere. Killer test uses *different*
+  scores (0.909 vs 0.800, both above) — passes under "closest wins", fails
+  here. Threshold uniqueness enforced by TOKENIZING the module and asserting
+  the `0.75` number token appears once (prose about it isn't a false positive).
+  Target compared **as written**, so `[[concepts/alpah]]` is reported, not
+  repaired — stripping the directory would let a wrong directory be silently
+  retargeted, exactly what criterion 16 warns against.
+  **⚠ REVIEW THIS:** registration order changed so `fix_broken_links` runs
+  BEFORE `fix_index_drift`, so a typo'd index entry is repaired (keeping its
+  prose) rather than deleted and re-added bare. General rule now in the module
+  docstring: edit-passes precede remove-passes.
 
 ## Task 16: Fix-mode plumbing — log.md, read-only default, --dry-run
 
