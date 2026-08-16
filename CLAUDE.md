@@ -39,3 +39,5 @@ grill → plan → implement (subagent per task) → review → finish
 Exit criteria of each skill are the entry conditions of the next.
 Each SKILL.md states both.
 # test
+# gate test
+# gate test
