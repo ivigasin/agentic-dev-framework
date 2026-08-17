@@ -386,7 +386,16 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   snapshot test.
 - Done when: tests pass. The no-write test is the single most important test in
   this plan — CI and pre-commit safety rest on it.
-- [ ] completed
+- [x] completed — every safety property **mutation-tested**, not merely green:
+  `if args.fix:`→`if True:`, double log append, log rewrite, dry-run calling
+  `apply_plan`, `exit_code_for` not skipping `fixed`, stray stdout print — each
+  mutation killed its test. Append-only asserted at BYTE level
+  (`after.startswith(before)`); `splitlines()` would let a CRLF rewrite pass.
+  No-write test also asserts exit 1, since a crash-on-startup writes nothing
+  too. **Missing `log.md` → warn on stderr, never create**: no check reports a
+  missing log, so stderr is the only channel that keeps a modified wiki from
+  going unrecorded. `--dry-run` without `--fix` is an argument error (exit 2),
+  not a no-op — the flag alone requests a mode that doesn't exist.
 
 ## Task 17: Rewire the framework — remove wiki-lint
 
@@ -455,7 +464,78 @@ contract is `wiki/SCHEMA.md`; read it for any task touching a check.
   `python3 -m unittest discover -s tools/tests -t tools`.
 - Done when: entire suite green, and the kitchen-sink fixture exercises all ten
   checks in the Orientation severity table.
-- [ ] completed
+- [x] completed — **the severity table's "ten checks" is stale; the registry
+  closed at 13.** Kitchen sink is generated in a tempfile (same reasoning as
+  Task 8) and derives its page count from `MAX_DIR_PAGES`.
+  "Exactly once" is unsatisfiable — three intrinsic overlaps, one of them
+  previously unrecorded: **an orphan page is necessarily also index-drift**,
+  since a page nothing links to can't be BFS-reached from INDEX.md. So the
+  assertion is the exact SET of `(check id, path)` pairs — 16 findings over 13
+  ids — plus a guard that the expected keys equal
+  `{c.check_id for c in checks.ALL_CHECKS}`, so a 14th check fails until
+  represented. Verified by 5 mutations (dead check, added check, over-reporting
+  check, flipped severity, emptied exemptions) — all killed.
+  README documents **five** flags; the plan said four.
+
+## Task 21: git pre-commit gate for wiki health
+
+Added 2026-08-16 after Task 20. Ships **alongside** Task 19, not instead of it:
+`PostToolUse` catches agent damage mid-session; this catches anyone's damage —
+including manual edits — at the commit boundary. Full rationale in
+`~/.claude/plans/translate-the-explanation-to-recursive-dove.md`.
+
+- Files: `githooks/pre-commit` (extend — it exists and `core.hooksPath=githooks`,
+  so it is live), `tools/tests/test_pre_commit_hook.py`, `README.md`
+- Test first: `tools/tests/test_pre_commit_hook.py` — static: `"hook is
+  executable"`, `"hook never passes --fix"`, `"hook uses checkout-index"`.
+  Integration (throwaway git repo in `tempfile`, `core.hooksPath` set):
+  `"clean staged wiki commits"`, `"staged error is rejected"`,
+  `"ALLOW_WIKI_UNHEALTHY=1 overrides"`, `"non-wiki commit passes while wiki is
+  broken"`, `"breakage staged but fixed in worktree is still rejected"`,
+  `"breakage in worktree but not staged is allowed"`, `"warning-only wiki
+  commits"`.
+- Context: spec criterion 3 (exit codes) and open question 4; `githooks/pre-commit`;
+  `.claude/hooks/session-start.sh` for shell style.
+- Details:
+  - **Checks STAGED content, not the working tree.** Materialize the whole
+    `wiki/` from the index — `git ls-files wiki/ | git checkout-index
+    --prefix="$tmp/" --stdin` — then `--path "$tmp/wiki"`. Whole graph, not just
+    the diff: orphans and 2-hop reachability are whole-graph properties.
+    `trap 'rm -rf "$tmp"' EXIT` for cleanup.
+  - Skip entirely when the commit touches no `wiki/` path.
+  - Branch on the CLI's exit code, never on parsed output: 0 allow, 1 block
+    unless `ALLOW_WIKI_UNHEALTHY=1`, 2 block with a distinct "checker itself
+    failed" message.
+  - **Never `--fix`** — a commit hook that edits files would stage changes the
+    user never reviewed.
+  - Restructure the existing governance branch so `ALLOW_GOVERNANCE=1` FALLS
+    THROUGH to the wiki gate instead of `exit 0`; otherwise a commit touching
+    both governance files and `wiki/` skips the wiki check entirely. Also make
+    its control flow explicit — line 16's `[[ ... ]] && exit 0` + `exit 1` only
+    works because `set -e` catches the failed `&&` list.
+- Done when: tests pass; live check rejects a staged `[[nonexistent-page]]` and
+  allows it under `ALLOW_WIKI_UNHEALTHY=1`.
+- [ ] completed — **RED phase done; implementation BLOCKED on
+  `Edit/Write(./githooks/**)` deny.** `tools/tests/test_pre_commit_hook.py`
+  (14 tests) is written and validated against a scratchpad reference hook:
+  14/14 green when implemented to spec, and 5 mutations each killed by the
+  intended test. 5 of the 14 are currently RED for the right reason; the other
+  9 pass vacuously today and become load-bearing once the gate lands.
+  Landing also needs `ALLOW_GOVERNANCE=1 git commit ...`.
+
+  Notes for whoever writes the hook:
+  1. Use `cd "$(git rev-parse --show-toplevel)"`, NOT `$(dirname "$0")` — with
+     `core.hooksPath` set, `$0`'s directory is the hooks dir, not the worktree
+     being committed.
+  2. **Unresolved:** is exit 2 overridable by `ALLOW_WIKI_UNHEALTHY=1`? Task 21
+     didn't say. The tests pin "no" — exit 2 means *unverified*, not
+     *unhealthy*. Argue with that test explicitly if you disagree; don't
+     quietly weaken it.
+  3. `--prefix="$tmp/"` needs the trailing slash, and the `wiki/`-scope skip
+     must come BEFORE the pipeline so an empty `git ls-files` is never piped
+     under `pipefail`.
+  4. Untested edge: repo with unborn HEAD. Existing hook has the same gap.
+  5. `README.md` is still owed by this task.
 
 ---
 

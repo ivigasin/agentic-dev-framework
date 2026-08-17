@@ -33,6 +33,9 @@ code path that writes is never entered.
   `--json` mode: it is a diagnostic, not the report, and routing it by mode
   would give stdout two possible meanings.
 - `--dry-run` without `--fix` is refused with exit 2 — see `main`.
+- A wiki with no `wiki/log.md` still gets repaired, but the run cannot record
+  itself and says so on stderr — see `log_missing_line`. The fix never creates
+  the file.
 """
 
 import argparse
@@ -169,6 +172,27 @@ def preview_lines(plan, wiki_path):
     return lines
 
 
+def log_missing_line(wiki_path, dry_run):
+    """Warn that a `--fix` run cannot record itself (SCHEMA rule 5).
+
+    Emitted in both modes, and on stderr in both, because it is a diagnostic
+    about the wiki's shape rather than part of the report. It matters more than
+    it looks: no *check* reports a missing `log.md`, and the fix declines to
+    create one, so this line is the only place the omission surfaces. Without
+    it a `--fix` would repair a wiki and leave no trace anywhere that it ran.
+
+    The dry-run wording is future tense for the same reason the preview is —
+    nothing happened yet, and a warning phrased as though it did would send a
+    reader looking for changes that are not on disk.
+    """
+    clause = "would not record" if dry_run else "did not record"
+    return (
+        f"{PROG}: warning: no {fixes.LOG_PATH} in {wiki_path}, so this run "
+        f"{clause} itself. wiki/SCHEMA.md rule 5 expects one line per run; "
+        f"create {fixes.LOG_PATH} by hand — a fix will not invent it."
+    )
+
+
 def main(argv=None):
     """Return a process exit code. Never raises SystemExit."""
     parser = build_parser()
@@ -232,6 +256,11 @@ def main(argv=None):
             report = Report(findings=plan.findings(), root=wiki_path)
             if plan.written:
                 print(f"{PROG}: wrote {', '.join(plan.written)}", file=sys.stderr)
+
+        if plan.log_missing:
+            # After the preview or the write notice: it qualifies what just
+            # happened, so it reads as a footnote to it rather than a headline.
+            print(log_missing_line(wiki_path, args.dry_run), file=sys.stderr)
 
     print(report.to_json() if args.json else report_text.render(report))
     return exit_code_for(report, args.strict)

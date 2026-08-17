@@ -165,6 +165,11 @@ class FixPlan:
         self.fixed = ()
         self.remaining = ()
         self.written = ()
+        # Set only by `_stage_log`, so it means "we were asked to log and there
+        # was nothing to append to" — never "logging was not requested". The
+        # CLI turns it into a warning; conflating the two would make every
+        # `log=False` caller look like a wiki missing its ledger.
+        self.log_missing = False
         self._pages = list(pages)
         self._by_path = {page.rel_path: page for page in self._pages}
         self._staged = {}
@@ -587,12 +592,28 @@ def _stage_log(plan, today=None):
     verbatim plus one more, so SCHEMA rule 5 holds by construction rather than
     by a promise in a docstring.
 
-    A wiki with no `log.md` gets none written. The same stance as the index
-    pass — an absent framework file is a finding for a human, not a file an
-    auto-fix invents.
+    A wiki with no `log.md` gets none written, and the plan says so via
+    `log_missing`. Three reasons not to create it:
+
+    - The same stance as the index pass. An absent framework file is a wiki
+      that is off-contract in a way a human has to decide about; the real
+      `wiki/log.md` opens with a two-line header this tool has nothing true to
+      write, and rule 5 governs *appending* to a ledger it presumes exists.
+    - Creating is categorically wider than editing. Every other write here is a
+      read-modify-write bounded by a file that already exists, so a `--fix`
+      aimed at the wrong `--path` can only garble that directory's own files.
+      A create — through `apply_plan`, which will `mkdir` parents — would seed
+      new files into it instead.
+    - Recording that the run happened is the *point* of the line. Inventing the
+      ledger to write it into records nothing anyone will find.
+
+    Skipping quietly is not an option, though: no check reports a missing
+    `log.md`, so silence would leave a wiki that was modified with no trace of
+    it anywhere. `log_missing` is how that reaches the user.
     """
     lines = plan.lines_for(LOG_PATH)
     if lines is None:
+        plan.log_missing = True
         return
     counts = {Severity.ERROR.value: 0, Severity.WARN.value: 0}
     for finding in plan.remaining:
