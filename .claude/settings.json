@@ -2,6 +2,12 @@
 
   "permissions":{
    "deny": [
+      "Bash(git push:*)",
+      "Bash(git commit --no-verify:*)"
+    ],
+    "ask": [
+      "Edit(./wiki/SCHEMA.md)",
+      "Write(./wiki/SCHEMA.md)",
       "Edit(./CLAUDE.md)",
       "Write(./CLAUDE.md)",
       "Edit(./.claude/**)",
@@ -10,12 +16,6 @@
       "Write(./skills/**)",
       "Edit(./githooks/**)",
       "Write(./githooks/**)",
-      "Bash(git push:*)",
-      "Bash(git commit --no-verify:*)"
-    ],
-    "ask": [
-      "Edit(./wiki/SCHEMA.md)",
-      "Write(./wiki/SCHEMA.md)"
     ]
   },
   "hooks": {
